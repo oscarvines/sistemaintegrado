@@ -32,20 +32,26 @@ try:
     col1, col2 = st.columns(2)
     with col1:
         empresa_label = st.selectbox("🏢 Seleccionar Empresa:", options=lista_opciones_empresa)
-        # Extraemos el CIF del label (lo que está entre paréntesis)
         cif_sel = empresa_label.split('(')[-1].replace(')', '').strip()
     with col2:
         anio_sel = st.selectbox("📅 Año:", [2025, 2024, 2023, 2026])
 
-    # 2. CARGAR TRABAJADORES (De ambas fuentes)
+    # 2. CARGAR TRABAJADORES (Unificación por NIF para evitar duplicados por nombre)
     q_trab_190 = conn.table("modelo_190_central").select("nombre, nif").eq("nif_empresa", cif_sel).eq("ejercicio", anio_sel).execute()
     q_trab_idc = conn.table("resumen_idcs_central").select("nombre, nif").eq("nif_empresa", cif_sel).eq("ejercicio", anio_sel).execute()
 
-    dict_trabajadores = {}
-    for r in (q_trab_190.data + q_trab_idc.data):
+    todos_los_registros = q_trab_190.data + q_trab_idc.data
+    
+    # Usamos un diccionario temporal para que mande el NIF único
+    nifs_procesados = {}
+    for r in todos_los_registros:
         nif_l = limpiar_nif(r['nif'])
         nombre_l = r['nombre'].strip().upper()
-        dict_trabajadores[f"{nombre_l} ({nif_l})"] = nif_l
+        if nif_l and nif_l not in nifs_procesados:
+            nifs_procesados[nif_l] = nombre_l
+
+    # Diccionario final para el selector
+    dict_trabajadores = {f"{nombre} ({nif})": nif for nif, nombre in nifs_procesados.items()}
 
     if not dict_trabajadores:
         st.warning(f"No hay ningún dato para el CIF {cif_sel} en {anio_sel}.")
@@ -84,7 +90,7 @@ try:
                 d2 = res_idc.data[0]
                 st.metric("Horas Efectivas Detectadas", f"{d2.get('horas_efectivas', 0)} h")
 
-            # --- DESGLOSE EN TABLAS (SIN CÓDIGOS) ---
+            # --- DESGLOSE EN TABLAS (Formato Profesional) ---
             with st.expander("📝 Detalle de registros encontrados"):
                 col_a, col_b = st.columns(2)
                 with col_a:
@@ -103,23 +109,30 @@ try:
                     if hay_idc:
                         d = res_idc.data[0]
                         
-                        # Recuperamos el CTP de la base de datos y lo formateamos
-                        # Si es 0 o 1000 es 100%, si no, dividimos por 10
-                        ctp_bd = d.get('ctp', 0)
-                        dedicacion_formateada = f"{ctp_bd / 10}%" if ctp_bd > 0 else "100%"
+                        # Lógica de Dedicación corregida para parciales como 875
+                        try:
+                            ctp_raw = d.get('ctp', 0)
+                            ctp_bd = int(ctp_raw) if ctp_raw is not None else 0
+                        except:
+                            ctp_bd = 0
+                        
+                        if ctp_bd == 0 or ctp_bd == 1000:
+                            dedicacion_formateada = "100%"
+                        else:
+                            dedicacion_formateada = f"{ctp_bd / 10}%"
 
                         st.table(pd.DataFrame({
                             "Concepto": ["Dedicación (CTP)", "Horas Efectivas", "Horas IT", "Días IT", "Estado"],
                             "Valor": [
                                 dedicacion_formateada, 
-                                f"{d['horas_efectivas']}h", 
-                                f"{d['horas_it']}h", 
-                                d['dias_it'], 
-                                d['estado']
+                                f"{d.get('horas_efectivas', 0)}h", 
+                                f"{d.get('horas_it', 0)}h", 
+                                d.get('dias_it', 0), 
+                                d.get('estado', 'N/A')
                             ]
                         }))
                     else:
                         st.error("No hay datos de IDC subidos")
 
 except Exception as e:
-    st.error(f"Error: {e}")
+    st.error(f"Error general: {e}")
